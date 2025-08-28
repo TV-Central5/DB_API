@@ -2,12 +2,13 @@
 import os
 import io
 import csv
+import socket
 from flask import Flask, request, jsonify, Response, abort
 import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 
-# Tải biến môi trường khi chạy LOCAL (trên Render bạn cấu hình ENV trong console)
+# Tải biến môi trường khi chạy LOCAL (trên Render dùng ENV trong console)
 load_dotenv()
 
 app = Flask(__name__)
@@ -23,9 +24,9 @@ def require_key():
 # ====== Kết nối CockroachDB qua wire PostgreSQL (psycopg3) ======
 def get_conn():
     """
-    Tạo connection tới CockroachDB.
-    Dùng sslmode=verify-full + sslrootcert (CA) theo yêu cầu Cockroach Cloud.
-    Nếu cluster cần routing, thêm options=--cluster=<CLUSTER_FLAG>.
+    Kết nối tới CockroachDB (Serverless/Managed).
+    - sslmode=verify-full + sslrootcert (CA) theo yêu cầu Cockroach Cloud.
+    - options=--cluster=<name> nếu cụm yêu cầu cluster routing.
     """
     dsn = (
         f"host={os.getenv('DB_HOST')} "
@@ -41,13 +42,23 @@ def get_conn():
         dsn += f" options=--cluster={cluster}"
     return psycopg.connect(dsn)
 
+# ====== Trang chào (tránh 404 ở "/") ======
+@app.get("/")
+def index():
+    return {
+        "service": "DB API",
+        "endpoints": ["/health", "/query", "/query.csv", "/debug/env", "/dbping"],
+        "auth": "Send header X-API-Key",
+    }
+
+# ====== Health (không đụng DB) ======
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 # ====== WHITELIST câu SQL được phép gọi từ Excel ======
 ALLOWED_QUERIES = {
-    # Kiểm tra kết nối
+    # Kiểm tra kết nối DB (SELECT now)
     "now": "SELECT now() AS server_time",
 
     # Liệt kê bảng (bỏ qua system schemas)
@@ -68,7 +79,7 @@ ALLOWED_QUERIES = {
         LIMIT %(limit)s OFFSET %(offset)s
     """,
 
-    # Nếu bảng có cột updated_at (kiểu timestamptz), lọc theo khoảng thời gian
+    # Nếu bảng có cột updated_at (timestamptz), lọc theo thời gian
     "detail_range": """
         SELECT *
         FROM public.detail
@@ -105,8 +116,8 @@ def query_json():
         abort(400, description=f"Query not allowed. Use one of: {', '.join(ALLOWED_QUERIES.keys())}")
 
     limit, offset = normalize_pagination(request.args)
-    from_dt = request.args.get("from")  # ví dụ: 2025-01-01
-    to_dt   = request.args.get("to")    # ví dụ: 2025-02-01
+    from_dt = request.args.get("from")
+    to_dt   = request.args.get("to")
     sql = ALLOWED_QUERIES[q]
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -137,22 +148,7 @@ def query_csv():
 
     return Response(buf.getvalue(), mimetype="text/csv")
 
-# ====== Xử lý lỗi gọn ======
-@app.errorhandler(400)
-def bad_request(e):
-    return jsonify(error=str(e)), 400
-
-@app.errorhandler(401)
-def unauthorized(e):
-    return jsonify(error=str(e)), 401
-
-@app.errorhandler(500)
-def server_error(e):
-    return jsonify(error="Internal Server Error"), 500
 # ====== DEBUG (tạm thời, giúp chẩn đoán) ======
-import socket
-from psycopg.rows import dict_row
-
 @app.get("/debug/env")
 def debug_env():
     return {
@@ -179,3 +175,16 @@ def dbping():
         return {"ok": True, "version": row["version"], "now": row["now"]}
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
+
+# ====== Xử lý lỗi gọn ======
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify(error=str(e)), 400
+
+@app.errorhandler(401)
+def unauthorized(e):
+    return jsonify(error=str(e)), 401
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify(error="Internal Server Error"), 500
