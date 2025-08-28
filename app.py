@@ -91,21 +91,42 @@ ALLOWED_QUERIES = {
 }
 
 def normalize_pagination(args, default_limit=100):
-    """Giới hạn limit/offset để tránh query quá lớn."""
+    """
+    Chuẩn hoá limit/offset:
+    - nếu limit=all => trả (None, 0) để bỏ LIMIT/OFFSET trong SQL.
+    - nếu là số => dùng số đó.
+    """
+    limit_arg = args.get("limit", str(default_limit))
+    if str(limit_arg).lower() == "all":
+        return None, 0
+
     try:
-        limit = int(args.get("limit", default_limit))
+        limit = int(limit_arg)
     except (TypeError, ValueError):
         limit = default_limit
+
     try:
         offset = int(args.get("offset", 0))
     except (TypeError, ValueError):
         offset = 0
 
-    if limit > 5000:
-        limit = 5000
     if offset < 0:
         offset = 0
     return limit, offset
+
+def apply_limit_params(sql: str, limit, offset, from_dt, to_dt):
+    """
+    Nếu limit is None => bỏ hẳn 'LIMIT %(limit)s OFFSET %(offset)s' khỏi câu SQL,
+    đồng thời chỉ truyền tham số (from, to) nếu có.
+    """
+    if limit is None:
+        # Bỏ LIMIT/OFFSET ở mọi query whitelist có mẫu này
+        sql_no_limit = sql.replace("LIMIT %(limit)s OFFSET %(offset)s", "")
+        params = {"from": from_dt, "to": to_dt}
+        return sql_no_limit, params
+    else:
+        params = {"limit": limit, "offset": offset, "from": from_dt, "to": to_dt}
+        return sql, params
 
 # ====== Endpoint JSON: /query?q=<key>&limit=&offset=&from=&to= ======
 @app.get("/query")
@@ -118,10 +139,11 @@ def query_json():
     limit, offset = normalize_pagination(request.args)
     from_dt = request.args.get("from")
     to_dt   = request.args.get("to")
-    sql = ALLOWED_QUERIES[q]
+    base_sql = ALLOWED_QUERIES[q]
+    sql, params = apply_limit_params(base_sql, limit, offset, from_dt, to_dt)
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"limit": limit, "offset": offset, "from": from_dt, "to": to_dt})
+        cur.execute(sql, params)
         rows = cur.fetchall()
     return jsonify(rows)
 
@@ -136,10 +158,11 @@ def query_csv():
     limit, offset = normalize_pagination(request.args, default_limit=1000)
     from_dt = request.args.get("from")
     to_dt   = request.args.get("to")
-    sql = ALLOWED_QUERIES[q]
+    base_sql = ALLOWED_QUERIES[q]
+    sql, params = apply_limit_params(base_sql, limit, offset, from_dt, to_dt)
 
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(sql, {"limit": limit, "offset": offset, "from": from_dt, "to": to_dt})
+        cur.execute(sql, params)
         cols = [d.name for d in cur.description]  # psycopg3: dùng d.name
         buf = io.StringIO()
         writer = csv.writer(buf)
