@@ -18,8 +18,12 @@ app = Flask(__name__)
 API_KEY = os.getenv("API_KEY", "central5")
 
 def require_key():
-    # Đổi header từ "X-API-Key" -> "API-KEY"
+    # Ưu tiên header API-KEY
     key = request.headers.get("API-KEY")
+    # Nếu không có header, thử query string ?apikey=...
+    if not key:
+        key = request.args.get("apikey")
+
     if not API_KEY or key != API_KEY:
         abort(401, description="Unauthorized")
 
@@ -45,7 +49,7 @@ def index():
     return {
         "service": "DB API",
         "endpoints": ["/health", "/query", "/query.csv", "/table/<tbl>.csv"],
-        "auth": "Header API-KEY",
+        "auth": "Header API-KEY hoặc query ?apikey=",
     }
 
 # ====== Health (không đụng DB) ======
@@ -53,7 +57,7 @@ def index():
 def health():
     return {"status": "ok"}
 
-# ====== Query whitelist (giữ lại) ======
+# ====== Query whitelist ======
 ALLOWED_QUERIES = {
     "now": "SELECT now() AS server_time",
     "tables": """
@@ -137,13 +141,10 @@ def query_csv():
 @app.get("/table/<tbl>.csv")
 def table_csv(tbl):
     require_key()
-
-    # Chỉ cho phép chữ cái, số, gạch dưới
     if not re.match(r"^[A-Za-z0-9_]+$", tbl):
         abort(400, description="Invalid table name")
 
     limit, offset = normalize_pagination(request.args, default_limit=1000)
-
     if limit is None:
         sql = f"SELECT * FROM public.{tbl} ORDER BY 1"
         params = {}
