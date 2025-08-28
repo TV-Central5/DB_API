@@ -1,15 +1,13 @@
-# FILE: entrypoint.sh
 #!/usr/bin/env bash
 set -e
 
-# Nếu bạn truyền CA cert qua secret CC_CA_CRT thì ghi ra file
+# Nếu có cert từ secret -> ghi ra file
 if [ -n "$CC_CA_CRT" ]; then
-  echo "Writing Cockroach CA cert to /app/cc-ca.crt"
   printf "%s" "$CC_CA_CRT" > /app/cc-ca.crt
   export SSL_ROOT_CERT=/app/cc-ca.crt
 fi
 
-# Port chuẩn cho Fly (đừng đổi)
+# Port mặc định 8080 (Fly.io mapping vào đây)
 export PORT="${PORT:-8080}"
 
 # Chạy gunicorn

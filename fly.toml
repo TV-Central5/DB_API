@@ -1,9 +1,8 @@
-# FILE: fly.toml
-app = "<app-name>"           # vd: db-api-bf8uoq
+app = "db-api-bf8uoq"
 primary_region = "sin"
 
 [http_service]
-  internal_port = 8080       # PHẢI trùng với port Gunicorn/entrypoint
+  internal_port = 8080
   force_https = true
   auto_start_machines = true
   auto_stop_machines = "off"

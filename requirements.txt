@@ -1,4 +1,3 @@
-# FILE: requirements.txt
 Flask==3.0.3
 gunicorn==21.2.0
 psycopg[binary]==3.2.9
