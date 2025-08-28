@@ -149,3 +149,33 @@ def unauthorized(e):
 @app.errorhandler(500)
 def server_error(e):
     return jsonify(error="Internal Server Error"), 500
+# ====== DEBUG (tạm thời, giúp chẩn đoán) ======
+import socket
+from psycopg.rows import dict_row
+
+@app.get("/debug/env")
+def debug_env():
+    return {
+        "DB_HOST": os.getenv("DB_HOST"),
+        "DB_PORT": os.getenv("DB_PORT"),
+        "DB_NAME": os.getenv("DB_NAME"),
+        "DB_USER": os.getenv("DB_USER"),
+        "SSL_MODE": os.getenv("SSL_MODE"),
+        "SSL_ROOT_CERT": os.getenv("SSL_ROOT_CERT"),
+        "CLUSTER_FLAG": os.getenv("CLUSTER_FLAG"),
+    }
+
+@app.get("/dbping")
+def dbping():
+    try:
+        host = os.getenv("DB_HOST")
+        # 1) thử resolve DNS
+        socket.getaddrinfo(host, None)
+
+        # 2) thử truy vấn đơn giản
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT version() AS version, now() AS now")
+            row = cur.fetchone()
+        return {"ok": True, "version": row["version"], "now": row["now"]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}, 500
