@@ -2,18 +2,19 @@
 import os
 import io
 import csv
+import re
 import socket
 from flask import Flask, request, jsonify, Response, abort
 import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 
-# Tải biến môi trường khi chạy LOCAL (trên Render dùng ENV trong console)
+# Load .env (local); trên Render sẽ dùng Environment Variables
 load_dotenv()
 
 app = Flask(__name__)
 
-# ====== Auth đơn giản bằng API key trong header ======
+# ====== Auth bằng API Key ======
 API_KEY = os.getenv("API_KEY", "mykey123")
 
 def require_key():
@@ -21,13 +22,8 @@ def require_key():
     if not API_KEY or key != API_KEY:
         abort(401, description="Unauthorized")
 
-# ====== Kết nối CockroachDB qua wire PostgreSQL (psycopg3) ======
+# ====== Kết nối Cockroach/Postgres ======
 def get_conn():
-    """
-    Kết nối tới CockroachDB (Serverless/Managed).
-    - sslmode=verify-full + sslrootcert (CA) theo yêu cầu Cockroach Cloud.
-    - options=--cluster=<name> nếu cụm yêu cầu cluster routing.
-    """
     dsn = (
         f"host={os.getenv('DB_HOST')} "
         f"port={os.getenv('DB_PORT', '26257')} "
@@ -42,13 +38,13 @@ def get_conn():
         dsn += f" options=--cluster={cluster}"
     return psycopg.connect(dsn)
 
-# ====== Trang chào (tránh 404 ở "/") ======
+# ====== Trang chào ======
 @app.get("/")
 def index():
     return {
         "service": "DB API",
-        "endpoints": ["/health", "/query", "/query.csv", "/debug/env", "/dbping"],
-        "auth": "Send header X-API-Key",
+        "endpoints": ["/health", "/query", "/query.csv", "/table/<tbl>.csv"],
+        "auth": "Header X-API-Key",
     }
 
 # ====== Health (không đụng DB) ======
@@ -56,12 +52,9 @@ def index():
 def health():
     return {"status": "ok"}
 
-# ====== WHITELIST câu SQL được phép gọi từ Excel ======
+# ====== Query whitelist (giữ lại) ======
 ALLOWED_QUERIES = {
-    # Kiểm tra kết nối DB (SELECT now)
     "now": "SELECT now() AS server_time",
-
-    # Liệt kê bảng (bỏ qua system schemas)
     "tables": """
         SELECT table_schema, table_name
         FROM information_schema.tables
@@ -70,65 +63,34 @@ ALLOWED_QUERIES = {
         ORDER BY table_schema, table_name
         LIMIT %(limit)s OFFSET %(offset)s
     """,
-
-    # Ví dụ đọc bảng public.detail (đổi theo bảng thật của bạn)
-    "detail_all": """
-        SELECT *
-        FROM public.detail
-        ORDER BY 1
-        LIMIT %(limit)s OFFSET %(offset)s
-    """,
-
-    # Nếu bảng có cột updated_at (timestamptz), lọc theo thời gian
-    "detail_range": """
-        SELECT *
-        FROM public.detail
-        WHERE (%(from)s IS NULL OR updated_at >= %(from)s::timestamptz)
-          AND (%(to)s   IS NULL OR updated_at <  %(to)s::timestamptz)
-        ORDER BY updated_at DESC NULLS LAST
-        LIMIT %(limit)s OFFSET %(offset)s
-    """,
 }
 
+# ====== Pagination helper ======
 def normalize_pagination(args, default_limit=100):
-    """
-    Chuẩn hoá limit/offset:
-    - nếu limit=all => trả (None, 0) để bỏ LIMIT/OFFSET trong SQL.
-    - nếu là số => dùng số đó.
-    """
     limit_arg = args.get("limit", str(default_limit))
     if str(limit_arg).lower() == "all":
         return None, 0
-
     try:
         limit = int(limit_arg)
     except (TypeError, ValueError):
         limit = default_limit
-
     try:
         offset = int(args.get("offset", 0))
     except (TypeError, ValueError):
         offset = 0
-
     if offset < 0:
         offset = 0
     return limit, offset
 
-def apply_limit_params(sql: str, limit, offset, from_dt, to_dt):
-    """
-    Nếu limit is None => bỏ hẳn 'LIMIT %(limit)s OFFSET %(offset)s' khỏi câu SQL,
-    đồng thời chỉ truyền tham số (from, to) nếu có.
-    """
+def apply_limit(sql, limit, offset, from_dt=None, to_dt=None):
     if limit is None:
-        # Bỏ LIMIT/OFFSET ở mọi query whitelist có mẫu này
-        sql_no_limit = sql.replace("LIMIT %(limit)s OFFSET %(offset)s", "")
+        sql = sql.replace("LIMIT %(limit)s OFFSET %(offset)s", "")
         params = {"from": from_dt, "to": to_dt}
-        return sql_no_limit, params
     else:
         params = {"limit": limit, "offset": offset, "from": from_dt, "to": to_dt}
-        return sql, params
+    return sql, params
 
-# ====== Endpoint JSON: /query?q=<key>&limit=&offset=&from=&to= ======
+# ====== Endpoint JSON whitelist ======
 @app.get("/query")
 def query_json():
     require_key()
@@ -140,14 +102,14 @@ def query_json():
     from_dt = request.args.get("from")
     to_dt   = request.args.get("to")
     base_sql = ALLOWED_QUERIES[q]
-    sql, params = apply_limit_params(base_sql, limit, offset, from_dt, to_dt)
+    sql, params = apply_limit(base_sql, limit, offset, from_dt, to_dt)
 
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
     return jsonify(rows)
 
-# ====== Endpoint CSV: /query.csv?q=<key>&... ======
+# ====== Endpoint CSV whitelist ======
 @app.get("/query.csv")
 def query_csv():
     require_key()
@@ -159,19 +121,45 @@ def query_csv():
     from_dt = request.args.get("from")
     to_dt   = request.args.get("to")
     base_sql = ALLOWED_QUERIES[q]
-    sql, params = apply_limit_params(base_sql, limit, offset, from_dt, to_dt)
+    sql, params = apply_limit(base_sql, limit, offset, from_dt, to_dt)
 
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(sql, params)
-        cols = [d.name for d in cur.description]  # psycopg3: dùng d.name
+        cols = [d.name for d in cur.description]
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(cols)
         writer.writerows(cur.fetchall())
-
     return Response(buf.getvalue(), mimetype="text/csv")
 
-# ====== DEBUG (tạm thời, giúp chẩn đoán) ======
+# ====== Endpoint generic: /table/<tbl>.csv ======
+@app.get("/table/<tbl>.csv")
+def table_csv(tbl):
+    require_key()
+
+    # Chỉ cho phép chữ cái, số, gạch dưới
+    if not re.match(r"^[A-Za-z0-9_]+$", tbl):
+        abort(400, description="Invalid table name")
+
+    limit, offset = normalize_pagination(request.args, default_limit=1000)
+
+    if limit is None:
+        sql = f"SELECT * FROM public.{tbl} ORDER BY 1"
+        params = {}
+    else:
+        sql = f"SELECT * FROM public.{tbl} ORDER BY 1 LIMIT %(limit)s OFFSET %(offset)s"
+        params = {"limit": limit, "offset": offset}
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d.name for d in cur.description]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(cols)
+        writer.writerows(cur.fetchall())
+    return Response(buf.getvalue(), mimetype="text/csv")
+
+# ====== Debug ENV & DB ping ======
 @app.get("/debug/env")
 def debug_env():
     return {
@@ -188,10 +176,7 @@ def debug_env():
 def dbping():
     try:
         host = os.getenv("DB_HOST")
-        # 1) thử resolve DNS
         socket.getaddrinfo(host, None)
-
-        # 2) thử truy vấn đơn giản
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT version() AS version, now() AS now")
             row = cur.fetchone()
@@ -199,7 +184,7 @@ def dbping():
     except Exception as e:
         return {"ok": False, "error": str(e)}, 500
 
-# ====== Xử lý lỗi gọn ======
+# ====== Error handling ======
 @app.errorhandler(400)
 def bad_request(e):
     return jsonify(error=str(e)), 400
