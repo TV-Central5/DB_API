@@ -9,16 +9,17 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 
-# Load .env (local); trên Render sẽ dùng Environment Variables
+# Load .env (local); trên Fly.io sẽ dùng Environment Variables
 load_dotenv()
 
 app = Flask(__name__)
 
 # ====== Auth bằng API Key ======
-API_KEY = os.getenv("API_KEY", "mykey123")
+API_KEY = os.getenv("API_KEY", "central5")
 
 def require_key():
-    key = request.headers.get("X-API-Key")
+    # Đổi header từ "X-API-Key" -> "API-KEY"
+    key = request.headers.get("API-KEY")
     if not API_KEY or key != API_KEY:
         abort(401, description="Unauthorized")
 
@@ -44,7 +45,7 @@ def index():
     return {
         "service": "DB API",
         "endpoints": ["/health", "/query", "/query.csv", "/table/<tbl>.csv"],
-        "auth": "Header X-API-Key",
+        "auth": "Header API-KEY",
     }
 
 # ====== Health (không đụng DB) ======
