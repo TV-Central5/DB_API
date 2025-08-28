@@ -1,0 +1,7 @@
+# FILE: .gitignore
+__pycache__/
+*.pyc
+.venv/
+env/
+.env
+*.crt
